@@ -1,14 +1,15 @@
 // Service worker for the static website. artifact/build.mjs fills in RELEASE and SHELL and writes it as sw.js.
 //
-// - The page itself: network first; from this release's cache when offline or the network stalls.
+// - The page itself: always revalidated with the server (the host lets browsers cache it for 10 minutes);
+//   this release's copy when offline or the network stalls, while the fresh copy is still saved for next time.
 // - assets/ (content-hashed bundle): from this release's cache.
 // - locked/**.bin (encrypted audio, PDFs, word lists and the payload; names change whenever the bytes do):
 //   cached on first use and kept across releases, so a played episode opens again without the network.
 // - locked/keys.json: network first, cached copy only when offline.
 // - Everything else (version.json, the free episode's streamed audio, word pronunciations): the browser as usual.
-const RELEASE = "a37d36a75d28";
+const RELEASE = "43740235c7a2";
 /* global __SHELL__ */
-const SHELL = ["./","assets/app.289802646f.js","assets/app.bceb7a0807.css","favicon.svg","manifest.webmanifest","icons/icon-192.png","icons/icon-512.png","icons/maskable-512.png","icons/apple-touch-icon.png"];
+const SHELL = ["./","assets/app.643e556e13.js","assets/app.0cf642c17e.css","favicon.svg","manifest.webmanifest","icons/icon-192.png","icons/icon-512.png","icons/maskable-512.png","icons/apple-touch-icon.png"];
 const SHELL_CACHE = `shiyin-shell-${RELEASE}`;
 const CONTENT_CACHE = "shiyin-content";
 /** How many cached files of each kind to keep (oldest dropped first). */
@@ -35,7 +36,7 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.origin !== scope.origin || !url.pathname.startsWith(scope.pathname)) return;
   const path = pathOf(url);
-  if (request.mode === "navigate") event.respondWith(page(request));
+  if (request.mode === "navigate") event.respondWith(page(event));
   else if (path.startsWith("assets/")) event.respondWith(cacheFirst(event, SHELL_CACHE, null));
   else if (path === "locked/keys.json") event.respondWith(networkFirst(request));
   else if (path.startsWith("locked/") && path.endsWith(".bin")) event.respondWith(cacheFirst(event, CONTENT_CACHE, kindOf(path)));
@@ -49,10 +50,14 @@ function kindOf(path) {
 }
 
 /** The page: whatever the network gives within a few seconds, else this release's copy. */
-async function page(request) {
+async function page(event) {
   const cached = caches.match(home, { cacheName: SHELL_CACHE });
-  const network = fetch(request);
-  network.catch(() => {});
+  // "no-cache" asks the server every time (a cheap 304 when nothing changed), so a new release shows at once.
+  const network = fetch(new Request(event.request, { cache: "no-cache" }));
+  // Keep the newest page even when a slow network made us answer from the cache.
+  event.waitUntil(network.then(async (response) => {
+    if (response.ok && response.type === "basic") await (await caches.open(SHELL_CACHE)).put(home, response.clone());
+  }).catch(() => {}));
   const stalled = new Promise((resolve) => setTimeout(resolve, 4000)).then(() => cached);
   try {
     return (await Promise.race([network, stalled])) ?? (await network);
